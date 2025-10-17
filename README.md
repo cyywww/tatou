@@ -54,5 +54,44 @@ http -v :5000/healthz
 # Open your browser at 127.0.0.1:5000 to check if the website is up.
 ```
 
+## Security Monitoring and Logging
+
+### Security Features
+
+- **Attack Detection**: Real-time monitoring of suspicious activities and potential security threats
+- **Security Logging**: Comprehensive logging of all security events and system activities
+
+### Security Logs
+
+The system maintains several types of security logs:
+
+- `logs/monitor.log` - Real-time attack monitoring and detection logs
+- `logs/recovery.log` - System recovery operations and status logs
+- Security events are logged with timestamps and detailed information
+
+### Monitoring Configuration
+
+Security monitoring is configured in `server/src/security_log_config.py` and can be customized for different environments. The monitoring system:
+
+- Runs continuous checks for potential attacks
+- Logs all security events with detailed timestamps
+- Provides automated recovery mechanisms
+- Maintains audit trails for security analysis
+
+### Viewing Security Logs
+
+To monitor security events in real-time:
+
+```bash
+# View monitoring logs
+tail -f logs/monitor.log
+
+# View recovery logs  
+tail -f logs/recovery.log
+
+# View all security logs
+tail -f logs/*.log
+```
+
 
 
