@@ -39,11 +39,19 @@ def create_app():
     app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dev-secret-change-me")
     app.config["STORAGE_DIR"] = Path(os.environ.get("STORAGE_DIR", "./storage")).resolve()
     app.config["TOKEN_TTL_SECONDS"] = int(os.environ.get("TOKEN_TTL_SECONDS", "86400"))
-    app.config["DB_USER"] = os.environ.get("DB_USER", "tatou")
-    app.config["DB_PASSWORD"] = os.environ.get("DB_PASSWORD", "tatou")
-    app.config["DB_HOST"] = os.environ.get("DB_HOST", "db")
-    app.config["DB_PORT"] = int(os.environ.get("DB_PORT", "3306"))
-    app.config["DB_NAME"] = os.environ.get("DB_NAME", "tatou")
+    
+    # --- Check for TEST_MODE ---
+    app.config["TEST_MODE"] = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+    
+    if not app.config["TEST_MODE"]:
+        # Normal mode: MySQL/MariaDB configuration
+        app.config["DB_USER"] = os.environ.get("DB_USER", "tatou")
+        app.config["DB_PASSWORD"] = os.environ.get("DB_PASSWORD", "tatou")
+        app.config["DB_HOST"] = os.environ.get("DB_HOST", "db")
+        app.config["DB_PORT"] = int(os.environ.get("DB_PORT", "3306"))
+        app.config["DB_NAME"] = os.environ.get("DB_NAME", "tatou")
+    # Test mode: SQLite in-memory database (no additional config needed)
+
     app.config["STORAGE_DIR"].mkdir(parents=True, exist_ok=True)
     
     # --- Initialize security monitoring ---
@@ -58,17 +66,122 @@ def create_app():
 
     # --- DB engine only (no Table metadata) ---
     def db_url() -> str:
-        return (
-            f"mysql+pymysql://{app.config['DB_USER']}:{app.config['DB_PASSWORD']}"
-            f"@{app.config['DB_HOST']}:{app.config['DB_PORT']}/{app.config['DB_NAME']}?charset=utf8mb4"
-        )
+        if app.config["TEST_MODE"]:
+            # Test mode: Use SQLite in-memory database
+            return "sqlite:///:memory:"
+        else:
+            # Normal mode: Use MySQL/MariaDB
+            return (
+                f"mysql+pymysql://{app.config['DB_USER']}:{app.config['DB_PASSWORD']}"
+                f"@{app.config['DB_HOST']}:{app.config['DB_PORT']}/{app.config['DB_NAME']}?charset=utf8mb4"
+            )
+
+    def init_test_database(engine):
+        """Initialize SQLite test database with tables and synthetic data."""
+        if not app.config["TEST_MODE"]:
+            return
+        
+        # SQLite-compatible table creation (without MySQL-specific syntax)
+        with engine.connect() as conn:
+            # Enable foreign keys for SQLite
+            conn.execute(text("PRAGMA foreign_keys = ON"))
+            conn.commit()
+            
+            # Create Users table (SQLite-compatible)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS Users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    email VARCHAR(320) NOT NULL,
+                    hpassword VARCHAR(255) NOT NULL,
+                    login VARCHAR(64) NOT NULL,
+                    UNIQUE(email)
+                )
+            """))
+            
+            # Create Documents table (SQLite-compatible)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS Documents (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name VARCHAR(255) NOT NULL,
+                    path VARCHAR(1024) NOT NULL,
+                    ownerid INTEGER NOT NULL,
+                    creation DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    sha256 BLOB NOT NULL,
+                    size INTEGER NOT NULL,
+                    UNIQUE(path),
+                    FOREIGN KEY (ownerid) REFERENCES Users(id) ON DELETE CASCADE
+                )
+            """))
+            
+            # Create Versions table (SQLite-compatible)
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS Versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    documentid INTEGER NOT NULL,
+                    link VARCHAR(255) NOT NULL,
+                    intended_for VARCHAR(320),
+                    secret VARCHAR(320) NOT NULL,
+                    method VARCHAR(32) NOT NULL,
+                    position TEXT,
+                    path VARCHAR(320) NOT NULL,
+                    UNIQUE(link),
+                    FOREIGN KEY (documentid) REFERENCES Documents(id) ON DELETE CASCADE
+                )
+            """))
+            
+            conn.commit()
+            
+            # Insert synthetic test data
+            # Check if data already exists to avoid duplicates
+            existing_users = conn.execute(text("SELECT COUNT(*) FROM Users")).scalar()
+            if existing_users == 0:
+                # Create test users
+                test_users = [
+                    {"email": "test@example.com", "login": "testuser", "password": "testpass123"},
+                    {"email": "admin@example.com", "login": "admin", "password": "admin123"},
+                    {"email": "user@example.com", "login": "demo", "password": "demo123"},
+                ]
+                
+                for user_data in test_users:
+                    hpassword = generate_password_hash(user_data["password"])
+                    conn.execute(
+                        text("INSERT INTO Users (email, hpassword, login) VALUES (:email, :hpw, :login)"),
+                        {"email": user_data["email"], "hpw": hpassword, "login": user_data["login"]}
+                    )
+                
+                conn.commit()
+                app.logger.info("Test database initialized with synthetic data")
 
     def get_engine():
         eng = app.config.get("_ENGINE")
         if eng is None:
             eng = create_engine(db_url(), pool_pre_ping=True, future=True)
             app.config["_ENGINE"] = eng
+            
+            # Initialize test database if in TEST_MODE
+            if app.config["TEST_MODE"]:
+                init_test_database(eng)
         return eng
+
+    # --- SQL Compatibility Helpers for TEST_MODE ---
+    def _hex_to_bytes(hex_str: str) -> bytes:
+        """Convert hex string to bytes. Compatible with UNHEX() in MySQL."""
+        return bytes.fromhex(hex_str)
+    
+    def _bytes_to_hex(data: bytes) -> str:
+        """Convert bytes to hex string. Compatible with HEX() in MySQL."""
+        return data.hex() if isinstance(data, bytes) else str(data)
+    
+    def _get_last_insert_id(conn, table_name: str = None) -> int:
+        """Get last insert ID. Compatible with LAST_INSERT_ID() in MySQL."""
+        if app.config["TEST_MODE"]:
+            # SQLite uses last_insert_rowid()
+            result = conn.execute(text("SELECT last_insert_rowid()")).scalar()
+            return int(result) if result else 0
+        else:
+            # MySQL uses LAST_INSERT_ID()
+            result = conn.execute(text("SELECT LAST_INSERT_ID()")).scalar()
+            return int(result) if result else 0
 
     # --- Helpers ---
     def _serializer():
@@ -298,28 +411,66 @@ def create_app():
 
         try:
             with get_engine().begin() as conn:
-                conn.execute(
-                    text("""
-                        INSERT INTO Documents (name, path, ownerid, sha256, size)
-                        VALUES (:name, :path, :ownerid, UNHEX(:sha256hex), :size)
-                    """),
-                    {
-                        "name": final_name,
-                        "path": str(stored_path),
-                        "ownerid": int(g.user["id"]),
-                        "sha256hex": sha_hex,
-                        "size": int(size),
-                    },
-                )
-                did = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
-                row = conn.execute(
-                    text("""
-                        SELECT id, name, creation, HEX(sha256) AS sha256_hex, size
-                        FROM Documents
-                        WHERE id = :id
-                    """),
-                    {"id": did},
-                ).one()
+                # Handle SHA256 conversion based on database type
+                if app.config["TEST_MODE"]:
+                    sha256_bytes = _hex_to_bytes(sha_hex)
+                    conn.execute(
+                        text("""
+                            INSERT INTO Documents (name, path, ownerid, sha256, size)
+                            VALUES (:name, :path, :ownerid, :sha256, :size)
+                        """),
+                        {
+                            "name": final_name,
+                            "path": str(stored_path),
+                            "ownerid": int(g.user["id"]),
+                            "sha256": sha256_bytes,
+                            "size": int(size),
+                        },
+                    )
+                else:
+                    conn.execute(
+                        text("""
+                            INSERT INTO Documents (name, path, ownerid, sha256, size)
+                            VALUES (:name, :path, :ownerid, UNHEX(:sha256hex), :size)
+                        """),
+                        {
+                            "name": final_name,
+                            "path": str(stored_path),
+                            "ownerid": int(g.user["id"]),
+                            "sha256hex": sha_hex,
+                            "size": int(size),
+                        },
+                    )
+                did = _get_last_insert_id(conn)
+                
+                # Handle SHA256 retrieval based on database type
+                if app.config["TEST_MODE"]:
+                    row = conn.execute(
+                        text("""
+                            SELECT id, name, creation, sha256, size
+                            FROM Documents
+                            WHERE id = :id
+                        """),
+                        {"id": did},
+                    ).one()
+                    # Convert bytes to hex
+                    sha256_hex = _bytes_to_hex(row.sha256) if isinstance(row.sha256, bytes) else row.sha256
+                    row = type('Row', (), {
+                        'id': row.id,
+                        'name': row.name,
+                        'creation': row.creation,
+                        'sha256_hex': sha256_hex,
+                        'size': row.size
+                    })()
+                else:
+                    row = conn.execute(
+                        text("""
+                            SELECT id, name, creation, HEX(sha256) AS sha256_hex, size
+                            FROM Documents
+                            WHERE id = :id
+                        """),
+                        {"id": did},
+                    ).one()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
 
@@ -337,25 +488,43 @@ def create_app():
     def list_documents():
         try:
             with get_engine().connect() as conn:
-                rows = conn.execute(
-                    text("""
-                        SELECT id, name, creation, HEX(sha256) AS sha256_hex, size
-                        FROM Documents
-                        WHERE ownerid = :uid
-                        ORDER BY creation DESC
-                    """),
-                    {"uid": int(g.user["id"])},
-                ).all()
+                if app.config["TEST_MODE"]:
+                    rows = conn.execute(
+                        text("""
+                            SELECT id, name, creation, sha256, size
+                            FROM Documents
+                            WHERE ownerid = :uid
+                            ORDER BY creation DESC
+                        """),
+                        {"uid": int(g.user["id"])},
+                    ).all()
+                    # Convert bytes to hex for each row
+                    docs = [{
+                        "id": int(r.id),
+                        "name": r.name,
+                        "creation": r.creation.isoformat() if hasattr(r.creation, "isoformat") else str(r.creation),
+                        "sha256": _bytes_to_hex(r.sha256) if isinstance(r.sha256, bytes) else r.sha256,
+                        "size": int(r.size),
+                    } for r in rows]
+                else:
+                    rows = conn.execute(
+                        text("""
+                            SELECT id, name, creation, HEX(sha256) AS sha256_hex, size
+                            FROM Documents
+                            WHERE ownerid = :uid
+                            ORDER BY creation DESC
+                        """),
+                        {"uid": int(g.user["id"])},
+                    ).all()
+                    docs = [{
+                        "id": int(r.id),
+                        "name": r.name,
+                        "creation": r.creation.isoformat() if hasattr(r.creation, "isoformat") else str(r.creation),
+                        "sha256": r.sha256_hex,
+                        "size": int(r.size),
+                    } for r in rows]
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
-
-        docs = [{
-            "id": int(r.id),
-            "name": r.name,
-            "creation": r.creation.isoformat() if hasattr(r.creation, "isoformat") else str(r.creation),
-            "sha256": r.sha256_hex,
-            "size": int(r.size),
-        } for r in rows]
         return jsonify({"documents": docs}), 200
 
     # GET /api/list-versions
@@ -440,15 +609,35 @@ def create_app():
         
         try:
             with get_engine().connect() as conn:
-                row = conn.execute(
-                    text("""
-                        SELECT id, name, path, HEX(sha256) AS sha256_hex, size
-                        FROM Documents
-                        WHERE id = :id AND ownerid = :uid
-                        LIMIT 1
-                    """),
-                    {"id": document_id, "uid": int(g.user["id"])},
-                ).first()
+                if app.config["TEST_MODE"]:
+                    row = conn.execute(
+                        text("""
+                            SELECT id, name, path, sha256, size
+                            FROM Documents
+                            WHERE id = :id AND ownerid = :uid
+                            LIMIT 1
+                        """),
+                        {"id": document_id, "uid": int(g.user["id"])},
+                    ).first()
+                    if row:
+                        sha256_hex = _bytes_to_hex(row.sha256) if isinstance(row.sha256, bytes) else row.sha256
+                        row = type('Row', (), {
+                            'id': row.id,
+                            'name': row.name,
+                            'path': row.path,
+                            'sha256_hex': sha256_hex,
+                            'size': row.size
+                        })()
+                else:
+                    row = conn.execute(
+                        text("""
+                            SELECT id, name, path, HEX(sha256) AS sha256_hex, size
+                            FROM Documents
+                            WHERE id = :id AND ownerid = :uid
+                            LIMIT 1
+                        """),
+                        {"id": document_id, "uid": int(g.user["id"])},
+                    ).first()
         except Exception as e:
             return jsonify({"error": f"database error: {str(e)}"}), 503
 
@@ -715,7 +904,7 @@ def create_app():
                         "path": str(dest_path)
                     },
                 )
-                vid = int(conn.execute(text("SELECT LAST_INSERT_ID()")).scalar())
+                vid = _get_last_insert_id(conn)
         except Exception as e:
             # best-effort cleanup if DB insert fails
             try:
