@@ -14,7 +14,7 @@ os.environ["TEST_MODE"] = "1"
 
 # 导入路径可能因项目结构而异，尝试多种导入方式
 try:
-    from server import app
+    from server.src.server import app
 except ImportError:
     # 如果上面的导入失败，尝试从 src 导入
     import sys

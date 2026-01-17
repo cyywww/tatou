@@ -15,14 +15,21 @@ os.environ["TEST_MODE"] = "1"
 
 # 导入路径可能因项目结构而异
 try:
-    from server import app
+    from server.src.server import app
 except ImportError:
+    # 如果上面的导入失败，尝试从 src 导入
     import sys
     from pathlib import Path
     server_src_path = Path(__file__).parent.parent / "src"
     if str(server_src_path) not in sys.path:
         sys.path.insert(0, str(server_src_path))
-    from server import app
+    # 尝试直接导入 server 模块
+    try:
+        from server import app
+    except ImportError:
+        # 如果还是失败，导入 server.py
+        import server
+        app = server.app
 
 
 # ============================================================================
@@ -288,16 +295,20 @@ class TestCreateWatermarkBranchCoverage:
     
     def test_create_watermark_database_error_on_query(self, test_client_with_auth, uploaded_document):
         """分支：数据库查询异常"""
-        with mock.patch('server.src.server.get_engine') as mock_get_engine:
-            mock_conn = mock.MagicMock()
-            mock_conn.__enter__ = mock.MagicMock(return_value=mock_conn)
-            mock_conn.__exit__ = mock.MagicMock(return_value=None)
-            mock_conn.execute.side_effect = Exception("Database connection failed")
-            
-            mock_engine = mock.MagicMock()
-            mock_engine.connect.return_value = mock_conn
-            mock_get_engine.return_value = mock_engine
-            
+        # 由于 get_engine 是内部函数，我们需要 mock app.config 中的 _ENGINE
+        original_engine = app.config.get("_ENGINE")
+        
+        # 创建一个会抛出异常的 mock engine
+        mock_engine = mock.MagicMock()
+        mock_conn = mock.MagicMock()
+        mock_conn.__enter__ = mock.MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = mock.MagicMock(return_value=None)
+        mock_conn.execute.side_effect = Exception("Database connection failed")
+        mock_engine.connect.return_value = mock_conn
+        mock_engine.begin.return_value = mock_conn
+        
+        app.config["_ENGINE"] = mock_engine
+        try:
             response = test_client_with_auth.post(
                 "/api/create-watermark",
                 json={
@@ -310,16 +321,24 @@ class TestCreateWatermarkBranchCoverage:
             )
             assert response.status_code == 503
             assert "database error" in response.get_json()["error"].lower()
+        finally:
+            # 恢复原始 engine
+            app.config["_ENGINE"] = original_engine
     
     # ===== 路径处理分支 =====
     
     def test_create_watermark_path_invalid(self, test_client_with_auth, uploaded_document, temp_storage_dir):
         """分支：路径解析失败（RuntimeError）"""
         # 注入一个会导致路径解析失败的路径
-        from server.src.server import get_engine
         from sqlalchemy import text
+        # 通过 app.config 获取 engine（get_engine 是内部函数，无法直接导入）
+        engine = app.config.get("_ENGINE")
+        if engine is None:
+            # 如果 engine 还未创建，触发一次数据库查询来初始化
+            test_client_with_auth.get("/healthz")
+            engine = app.config.get("_ENGINE")
         
-        with get_engine().begin() as conn:
+        with engine.begin() as conn:
             # 更新文档路径为一个会导致 RuntimeError 的路径
             conn.execute(
                 text("UPDATE Documents SET path = :path WHERE id = :id"),
@@ -342,10 +361,14 @@ class TestCreateWatermarkBranchCoverage:
     def test_create_watermark_file_missing(self, test_client_with_auth, uploaded_document, temp_storage_dir):
         """分支：文件不存在"""
         # 删除文件但保留数据库记录
-        from server.src.server import get_engine
         from sqlalchemy import text
+        # 通过 app.config 获取 engine
+        engine = app.config.get("_ENGINE")
+        if engine is None:
+            test_client_with_auth.get("/healthz")
+            engine = app.config.get("_ENGINE")
         
-        with get_engine().connect() as conn:
+        with engine.connect() as conn:
             row = conn.execute(
                 text("SELECT path FROM Documents WHERE id = :id"),
                 {"id": uploaded_document}
@@ -473,11 +496,11 @@ class TestCreateWatermarkBranchCoverage:
         with mock.patch('watermarking_utils.apply_watermark', side_effect=create_mock_apply_watermark(should_succeed=True)):
             with mock.patch('watermarking_utils.is_watermarking_applicable', side_effect=create_mock_is_watermarking_applicable(should_succeed=True)):
                 # 先正常查询文档，然后让插入失败
-                from server.src.server import get_engine
                 from sqlalchemy import text
+                engine = app.config.get("_ENGINE")
                 
                 # 确保文档存在
-                with get_engine().connect() as conn:
+                with engine.connect() as conn:
                     row = conn.execute(
                         text("SELECT path FROM Documents WHERE id = :id"),
                         {"id": uploaded_document}
@@ -485,7 +508,7 @@ class TestCreateWatermarkBranchCoverage:
                     doc_path = row.path if row else str(temp_storage_dir / "files" / "testuser" / "test.pdf")
                 
                 # Mock 数据库插入失败
-                original_begin = get_engine().begin
+                original_begin = engine.begin
                 call_count = [0]
                 
                 def mock_begin():
@@ -498,7 +521,7 @@ class TestCreateWatermarkBranchCoverage:
                         return mock_conn
                     return original_begin()
                 
-                with mock.patch.object(get_engine(), 'begin', side_effect=mock_begin):
+                with mock.patch.object(engine, 'begin', side_effect=mock_begin):
                     response = test_client_with_auth.post(
                         "/api/create-watermark",
                         json={
@@ -644,16 +667,18 @@ class TestReadWatermarkBranchCoverage:
     
     def test_read_watermark_database_error(self, test_client_with_auth, uploaded_document):
         """分支：数据库查询异常"""
-        with mock.patch('server.src.server.get_engine') as mock_get_engine:
-            mock_conn = mock.MagicMock()
-            mock_conn.__enter__ = mock.MagicMock(return_value=mock_conn)
-            mock_conn.__exit__ = mock.MagicMock(return_value=None)
-            mock_conn.execute.side_effect = Exception("Database error")
-            
-            mock_engine = mock.MagicMock()
-            mock_engine.connect.return_value = mock_conn
-            mock_get_engine.return_value = mock_engine
-            
+        # Mock app.config 中的 _ENGINE
+        original_engine = app.config.get("_ENGINE")
+        
+        mock_engine = mock.MagicMock()
+        mock_conn = mock.MagicMock()
+        mock_conn.__enter__ = mock.MagicMock(return_value=mock_conn)
+        mock_conn.__exit__ = mock.MagicMock(return_value=None)
+        mock_conn.execute.side_effect = Exception("Database error")
+        mock_engine.connect.return_value = mock_conn
+        
+        app.config["_ENGINE"] = mock_engine
+        try:
             response = test_client_with_auth.post(
                 "/api/read-watermark",
                 json={
@@ -663,15 +688,20 @@ class TestReadWatermarkBranchCoverage:
                 }
             )
             assert response.status_code == 503
+        finally:
+            app.config["_ENGINE"] = original_engine
     
     # ===== 路径处理分支 =====
     
     def test_read_watermark_path_invalid(self, test_client_with_auth, uploaded_document):
         """分支：路径解析失败"""
-        from server.src.server import get_engine
         from sqlalchemy import text
+        engine = app.config.get("_ENGINE")
+        if engine is None:
+            test_client_with_auth.get("/healthz")
+            engine = app.config.get("_ENGINE")
         
-        with get_engine().begin() as conn:
+        with engine.begin() as conn:
             conn.execute(
                 text("UPDATE Documents SET path = :path WHERE id = :id"),
                 {"path": "../../../etc/passwd", "id": uploaded_document}
@@ -689,10 +719,13 @@ class TestReadWatermarkBranchCoverage:
     
     def test_read_watermark_file_missing(self, test_client_with_auth, uploaded_document):
         """分支：文件不存在"""
-        from server.src.server import get_engine
         from sqlalchemy import text
+        engine = app.config.get("_ENGINE")
+        if engine is None:
+            test_client_with_auth.get("/healthz")
+            engine = app.config.get("_ENGINE")
         
-        with get_engine().connect() as conn:
+        with engine.connect() as conn:
             row = conn.execute(
                 text("SELECT path FROM Documents WHERE id = :id"),
                 {"id": uploaded_document}
