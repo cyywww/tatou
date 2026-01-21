@@ -9,6 +9,7 @@ import pytest
 from pathlib import Path
 import tempfile
 import shutil
+from sqlalchemy import text  # 新增引用
 
 # 设置测试模式环境变量（必须在导入 server 之前设置）
 os.environ["TEST_MODE"] = "1"
@@ -82,9 +83,33 @@ def test_client_with_auth(temp_storage_dir):
     """创建测试客户端并设置认证 token"""
     app.config["STORAGE_DIR"] = temp_storage_dir
     
-    client = app.test_client()
+    # --- 关键修改开始：数据库清理与初始化 ---
+    # 强制初始化 engine (如果尚未初始化)
+    with app.app_context():
+        if app.config.get("_ENGINE") is None:
+            # 通过访问 healthz 触发 get_engine
+            with app.test_client() as c:
+                c.get("/healthz")
+        
+        engine = app.config.get("_ENGINE")
+        if engine:
+            # 清空所有表，防止数据冲突 (assert 503 == 201 的根本原因)
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM Versions"))
+                conn.execute(text("DELETE FROM Documents"))
+                conn.execute(text("DELETE FROM Users"))
     
-    # 使用测试模式下的测试用户登录
+    client = app.test_client()
+
+    # 重新注册测试用户 (因为刚才把 Users 表清空了)
+    client.post("/api/create-user", json={
+        "email": "test@example.com",
+        "login": "testuser",
+        "password": "testpass123"
+    })
+    # --- 关键修改结束 ---
+    
+    # 使用测试用户登录
     login_response = client.post("/api/login", json={
         "email": "test@example.com",
         "password": "testpass123"
@@ -505,7 +530,6 @@ class TestCreateWatermarkBranchCoverage:
                         text("SELECT path FROM Documents WHERE id = :id"),
                         {"id": uploaded_document}
                     ).first()
-                    doc_path = row.path if row else str(temp_storage_dir / "files" / "testuser" / "test.pdf")
                 
                 # Mock 数据库插入失败
                 original_begin = engine.begin
@@ -787,4 +811,3 @@ class TestReadWatermarkBranchCoverage:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--cov=server.src.server", "--cov-branch"])
-
