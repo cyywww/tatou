@@ -4,33 +4,52 @@
 使用 Mock 水印功能来覆盖所有可达的逻辑分支。
 """
 import os
+import sys
 import unittest.mock as mock
+from unittest.mock import MagicMock
 import pytest
 from pathlib import Path
 import tempfile
 import shutil
-from sqlalchemy import text  # 新增引用
+from sqlalchemy import text
 
-# 设置测试模式环境变量（必须在导入 server 之前设置）
+# =================================================================
+# 【核心修复 1：路径修正】
+# 必须最先执行！将 src 目录加入 Python 搜索路径的“第一位”。
+# 这样 'import server' 就会找到 src/server.py，而不是导入 server 文件夹。
+# 同时也解决了 'ModuleNotFoundError: No module named watermarking_utils'
+# =================================================================
+# 获取当前脚本的上级目录的 sibling 'src' 目录
+src_path = Path(__file__).parent.parent / "src"
+sys.path.insert(0, str(src_path))
+
+# =================================================================
+# 【核心修复 2：环境隔离补丁】
+# 欺骗 Python：这些库由于“已经加载”，不需要再去读硬盘文件
+# 解决 PyO3/Cryptography 环境冲突
+# =================================================================
+mock_module = MagicMock()
+sys.modules["cryptography"] = mock_module
+sys.modules["cryptography.hazmat"] = mock_module
+sys.modules["cryptography.hazmat.bindings"] = mock_module
+sys.modules["cryptography.hazmat.bindings._rust"] = mock_module
+sys.modules["cryptography.hazmat.primitives"] = mock_module
+sys.modules["cryptography.hazmat.primitives.hashes"] = mock_module
+sys.modules["pgpy"] = mock_module
+sys.modules["pgpy.PGPKey"] = mock_module
+sys.modules["pgpy.PGPMessage"] = mock_module
+sys.modules["pgpy.constants"] = mock_module
+sys.modules["rmap"] = mock_module
+sys.modules["rmap.identity_manager"] = mock_module
+sys.modules["rmap.compat_helpers"] = mock_module
+sys.modules["rmap.rmap"] = mock_module 
+# =================================================================
+
+# 设置测试模式环境变量
 os.environ["TEST_MODE"] = "1"
 
-# 导入路径可能因项目结构而异
-try:
-    from server.src.server import app
-except ImportError:
-    # 如果上面的导入失败，尝试从 src 导入
-    import sys
-    from pathlib import Path
-    server_src_path = Path(__file__).parent.parent / "src"
-    if str(server_src_path) not in sys.path:
-        sys.path.insert(0, str(server_src_path))
-    # 尝试直接导入 server 模块
-    try:
-        from server import app
-    except ImportError:
-        # 如果还是失败，导入 server.py
-        import server
-        app = server.app
+# 导入 Server (现在因为 src 在 sys.path 里，这行代码能正常工作了)
+from server import app
 
 
 # ============================================================================
@@ -83,33 +102,43 @@ def test_client_with_auth(temp_storage_dir):
     """创建测试客户端并设置认证 token"""
     app.config["STORAGE_DIR"] = temp_storage_dir
     
-    # --- 关键修改开始：数据库清理与初始化 ---
-    # 强制初始化 engine (如果尚未初始化)
+    # --- 修复 503 错误：在当前工作目录创建伪造的服务器私钥 ---
+    # 错误日志显示服务器在 storage/pki 寻找密钥
+    cwd_pki_dir = Path("storage/pki")
+    cwd_pki_dir.mkdir(parents=True, exist_ok=True)
+    fake_key_path = cwd_pki_dir / "g6.asc"
+    
+    created_fake_key = False
+    if not fake_key_path.exists():
+        fake_key_path.write_text("FAKE PRIVATE KEY CONTENT")
+        created_fake_key = True
+    # ------------------------------------------
+
+    # --- 数据库清理 ---
     with app.app_context():
+        # 触发 engine 初始化
         if app.config.get("_ENGINE") is None:
-            # 通过访问 healthz 触发 get_engine
             with app.test_client() as c:
                 c.get("/healthz")
         
         engine = app.config.get("_ENGINE")
         if engine:
-            # 清空所有表，防止数据冲突 (assert 503 == 201 的根本原因)
             with engine.begin() as conn:
+                # 清空表防止 IntegrityError
                 conn.execute(text("DELETE FROM Versions"))
                 conn.execute(text("DELETE FROM Documents"))
                 conn.execute(text("DELETE FROM Users"))
     
     client = app.test_client()
 
-    # 重新注册测试用户 (因为刚才把 Users 表清空了)
+    # 重新注册测试用户
     client.post("/api/create-user", json={
         "email": "test@example.com",
         "login": "testuser",
         "password": "testpass123"
     })
-    # --- 关键修改结束 ---
     
-    # 使用测试用户登录
+    # 登录
     login_response = client.post("/api/login", json={
         "email": "test@example.com",
         "password": "testpass123"
@@ -119,7 +148,11 @@ def test_client_with_auth(temp_storage_dir):
         token = login_response.get_json()["token"]
         client.environ_base['HTTP_AUTHORIZATION'] = f'Bearer {token}'
     
-    return client
+    yield client
+
+    # (可选) 测试结束后清理假密钥
+    if created_fake_key and fake_key_path.exists():
+        fake_key_path.unlink()
 
 
 @pytest.fixture
@@ -810,4 +843,4 @@ class TestReadWatermarkBranchCoverage:
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v", "--cov=server.src.server", "--cov-branch"])
+    pytest.main([__file__, "-v", "--cov=src", "--cov-branch"])
