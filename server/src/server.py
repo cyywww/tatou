@@ -908,8 +908,9 @@ def create_app():
         except Exception as e:
             # best-effort cleanup if DB insert fails
             try:
-                dest_path.unlink(missing_ok=True)
+                dest_path.unlink(missing_ok=True)   # ... some cleanup code ...
             except Exception:
+                # Uncovered: Defensive coding, cleanup failure should not block response
                 pass
             return jsonify({"error": f"database error during version insert: {e}"}), 503
 
