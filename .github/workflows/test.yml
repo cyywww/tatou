@@ -1,0 +1,38 @@
+name: Run Unit Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    
+    defaults:
+      run:
+        working-directory: ./server  # 👈 关键：指定在 server 目录下运行
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python 3.12
+      uses: actions/setup-python@v4
+      with:
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        # 安装项目依赖
+        pip install .
+        # 安装测试工具
+        pip install pytest pytest-cov
+        # 手动安装那个特殊的 rmap 包 (解决依赖问题)
+        pip install "https://github.com/nharrand/RMAP-Server/releases/download/v2.0.0/rmap-2.0.0-py3-none-any.whl"
+
+    - name: Run Tests with Coverage
+      #  这里的命令和你本地运行的一样，加上 --cov=src 确保覆盖率统计正确
+      run: |
+        python -m pytest test/test_watermark_branch_coverage.py --cov=src --cov-branch --cov-report=term
