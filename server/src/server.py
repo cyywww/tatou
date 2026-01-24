@@ -909,6 +909,7 @@ def create_app():
             # best-effort cleanup if DB insert fails
             try:
                 dest_path.unlink(missing_ok=True)   # ... some cleanup code ...
+            # to ensure the response is returned to the user regardless of temporary file errors.
             except Exception:
                 # Uncovered: Defensive coding, cleanup failure should not block response
                 pass
