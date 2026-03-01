@@ -1,8 +1,12 @@
+import sys
+import os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
 import pytest
 import json
 import base64
-from server.src.yuwei_cao_watermark import YuweiCaoWatermark
-from server.src.watermarking_method import SecretNotFoundError, InvalidKeyError, WatermarkingError
+from yuwei_cao_watermark import YuweiCaoWatermark
+from watermarking_method import SecretNotFoundError, InvalidKeyError, WatermarkingError
 
 # Fixtures
 @pytest.fixture
