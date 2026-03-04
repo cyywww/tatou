@@ -184,6 +184,16 @@ def create_app():
         except Exception:
             db_ok = False
         return jsonify({"message": "The server is up and running.", "db_connected": db_ok}), 200
+    
+    @app.get("/exam")
+    def exam():
+        try:
+            with get_engine().connect() as conn:
+                conn.execute(text("SELECT 1"))
+            db_ok = True
+        except Exception:
+            db_ok = False
+        return jsonify({"message": "Hello.", "db_connected": db_ok}), 200
 
     # POST /api/create-user {email, login, password}
     @app.post("/api/create-user")
