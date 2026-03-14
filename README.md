@@ -244,3 +244,50 @@ chmod +x test_api.sh
 ./test_api.sh
 ```
 
+
+
+
+## 🛠 Engineering Workflow (DevSecOps)
+
+## 🚀 Getting Started
+
+## Prerequisites
+
+- Python 3.12+
+- Virtual Environment (venv)
+
+## Local Development Setup
+
+1. **Clone the Repository**:
+
+   
+   ```bash
+   git clone https://github.com/zhenshaoshen/tatou.git
+   cd tatou/server
+   ```
+
+2. **Switch to Feature Branch**:
+
+   ```bash
+   git checkout feature/mock-db-implementation
+   ```
+
+3. **Install Dependencies**:
+
+   
+   ```bash
+   pip install .
+   pip install pytest pytest-cov
+   ```
+
+## Running the Test Suite
+
+To verify the system logic and generate a missing-line coverage report:
+
+
+```bash
+python -m pytest test/test_watermark_branch_coverage.py --cov=src --cov-branch --cov-report=term-missing
+```
+
+------
+
