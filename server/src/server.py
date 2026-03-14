@@ -800,8 +800,8 @@ def create_app():
                 or (request.is_json and (request.get_json(silent=True) or {}).get("id"))
             )
         try:
-            # doc_id = int(document_id)
-            doc_id = "I am a test"
+            doc_id = int(document_id)
+            # doc_id = "I am a test"
         except (TypeError, ValueError):
             return jsonify({"error": "document id required"}), 400
             
